@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
-import efinance as ef
-import akshare as ak
+import requests
 import time
 
 # 页面基础配置
-st.set_page_config(page_title="A股尾盘点火狙击终端", layout="wide")
+st.set_page_config(page_title="全自动选股 · 云端旗舰直连版", layout="wide")
 
 # 核心列配置
 COLUMN_CONFIG = {
@@ -32,34 +31,37 @@ def safe_style_df(df):
     temp_df = df[cols].copy()
     return temp_df.style.map(color_rules, subset=['涨跌幅'])
 
-# 统一数据清洗逻辑
-def clean_data(df, source):
-    if df is None or df.empty: return None
-    if source == "ak":
-        df = df.rename(columns={'代码': '股票代码', '名称': '股票名称', '涨跌幅': '涨幅'})
-    if '涨幅' in df.columns and '涨跌幅' not in df.columns:
-        df = df.rename(columns={'涨幅': '涨跌幅'})
+# 云端裸连东财底层接口 (不写本地文件，无视权限报错)
+def fetch_market_data():
+    url = "http://8.push2.eastmoney.com/api/qt/clist/get"
+    params = {
+        "pn": "1", "pz": "6000", "po": "1", "np": "1", "fltt": "2", "invt": "2", "fid": "f3",
+        "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
+        "fields": "f12,f14,f2,f3,f10,f8,f6"
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
-    df['股票代码'] = df['股票代码'].astype(str).str.strip().str.zfill(6)
-    for col in ['最新价', '涨跌幅', '量比', '换手率', '成交额']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace('%',''), errors='coerce').fillna(0)
-    return df
-
-# 双核抓取引擎
-def get_market_snapshot():
     try:
-        df = ef.stock.get_realtime_quotes()
-        if df is not None and not df.empty: return clean_data(df, "ef"), "⚡ 云端高速节点 (ef)"
-    except: pass
-    try:
-        df = ak.stock_zh_a_spot_em()
-        if df is not None and not df.empty: return clean_data(df, "ak"), "🛡️ 云端备用节点 (ak)"
-    except: pass
-    return None, "❌ 获取失败"
+        res = requests.get(url, params=params, headers=headers, timeout=10)
+        if res.status_code != 200: return None, f"HTTP报错 {res.status_code}"
+        data = res.json()
+        items = data.get("data", {}).get("diff", [])
+        if not items: return None, "数据返回为空"
+        
+        df = pd.DataFrame(items)
+        rename_map = {"f12": "股票代码", "f14": "股票名称", "f2": "最新价", "f3": "涨跌幅", "f10": "量比", "f8": "换手率", "f6": "成交额"}
+        df = df.rename(columns=rename_map)
+        
+        for col in ['最新价', '涨跌幅', '量比', '换手率', '成交额']:
+            df[col] = pd.to_numeric(df[col].replace('-', '0'), errors='coerce').fillna(0)
+        df['股票代码'] = df['股票代码'].astype(str).str.zfill(6)
+        
+        return df, "⚡ 云端底层专线直连"
+    except Exception as e:
+        return None, f"请求异常: {str(e)[:40]}"
 
 # --- 界面布局 ---
-st.title("🎯 全自动选股 · 云端旗舰版")
+st.title("🎯 全自动选股 · 云端旗舰直连版")
 
 # 初始化状态
 for key in ['base_pool', 'auction_pool', 'alert_pool', 'top8_pool']:
@@ -68,8 +70,8 @@ for key in ['base_pool', 'auction_pool', 'alert_pool', 'top8_pool']:
 with st.sidebar:
     st.header("🕹️ 控制台")
     if st.button("🚀 强制全流程刷新", use_container_width=True):
-        with st.spinner("云服务器正在穿透获取全市场行情..."):
-            snap, node = get_market_snapshot()
+        with st.spinner("云服务器正在秒拉全市场行情..."):
+            snap, node = fetch_market_data()
             if snap is not None:
                 # 过滤逻辑：主板 + 非ST + 5元以上
                 base = snap[snap['股票代码'].str.startswith(('00', '60')) & (~snap['股票名称'].str.contains('ST')) & (snap['最新价'] > 5)]
@@ -83,9 +85,9 @@ with st.sidebar:
                 st.session_state.alert_pool = alert
                 if not alert.empty:
                     st.session_state.top8_pool = alert.sort_values(by='成交额', ascending=False).head(8)
-                st.sidebar.success(f"更新成功！来源: {node}")
+                st.success(f"更新成功！数据源: {node}")
             else:
-                st.sidebar.error("云端拉取异常，请稍后重试。")
+                st.error(f"拉取失败，原因: {node}")
 
 # 渲染数据表格
 c1, c2 = st.columns(2)
